@@ -3,7 +3,6 @@ use crate::noise::handshake::NoiseHandshake;
 use crate::noise::NoiseStream;
 use std::error::Error;
 use std::net::SocketAddr;
-use tokio::io::{AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, ToSocketAddrs};
 
 pub struct NoiseListener {

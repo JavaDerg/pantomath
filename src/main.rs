@@ -28,8 +28,33 @@ async fn main() {
             .await
             .unwrap()
     });
-    let server = listener.accept().await.unwrap();
-    let client = client.await.unwrap();
+    let (mut server, _) = listener.accept().await.unwrap();
+    let mut client = client.await.unwrap();
+
+    let packet = proto::message::Message {
+        msg: format!("{:#?}", [0u8; 65536]),
+    };
+
+    client.send(packet.clone()).await.unwrap();
+
+    /*tokio::spawn(async move {
+        loop {
+            let packet = proto::message::Message {
+                msg: "Hello world ^^".to_string(),
+            };
+
+            client.send(packet.clone()).await.unwrap();
+        }
+    });*/
+
+    for i in 1.. {
+        server.recv::<proto::message::Message>().await.unwrap();
+        /*tracing::info!(
+            "#{:6} {:?}",
+            i,
+            server.recv::<proto::message::Message>().await.unwrap()
+        );*/
+    }
 
     // client.write(b"Hello world!").await.unwrap();
     // client.write(b"Hello world!").await.unwrap();

@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::noise::framed::Frame16TcpStream;
+use crate::noise::framed::{Frame16TcpStream, NOISE_FRAME_MAX_LEN};
 use crate::noise::NoiseStream;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -41,27 +41,21 @@ impl NoiseHandshake {
 
     // FIXME: Use better Error type
     pub(super) async fn shake_priv(mut self, client: bool) -> Result<NoiseStream, Box<dyn Error>> {
-        let mut s_buf = [0u8; 65535];
-        let mut n_buf = [0u8; 65535];
+        let mut s_buf = [0u8; NOISE_FRAME_MAX_LEN];
+        let mut n_buf = [0u8; NOISE_FRAME_MAX_LEN];
         if client {
-            tracing::info!("writing");
             let len = self.state.write_message(&[], &mut s_buf[..])?;
             self.stream.write(&s_buf[..len]).await?;
         }
         while !self.state.is_handshake_finished() {
-            tracing::info!("reading");
             let len = self.stream.read(&mut s_buf[..]).await?;
             let len = self.state.read_message(&s_buf[..len], &mut n_buf[..])?;
             if self.state.is_handshake_finished() {
-                tracing::info!("done");
                 break;
             }
-            tracing::info!("writing");
             let len = self.state.write_message(&n_buf[..len], &mut s_buf[..])?;
             self.stream.write(&s_buf[..len]).await?;
         }
-
-        tracing::info!("done2");
 
         Ok(NoiseStream {
             stream: self.stream,

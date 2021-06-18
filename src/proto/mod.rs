@@ -1,3 +1,3 @@
-pub mod noise {
-    include!(concat!(env!("OUT_DIR"), "/proto.noise.rs"));
+pub mod message {
+    include!(concat!(env!("OUT_DIR"), "/proto.message.rs"));
 }

@@ -1,16 +1,17 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::io::{Error, ErrorKind};
-use std::mem::{swap, MaybeUninit};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
-/// noise messages can be max 2¹⁶ bytes
-const MAX_FRAME_CONTENT_SIZE: usize = 2usize.pow(16);
+/// max noise message len
+pub const NOISE_FRAME_MAX_LEN: usize = 65535;
+/// noise tag len
+pub const NOISE_TAG_LEN: usize = 16;
 
-/// MAX_FRAME_CONTENT_SIZE + (1..=3) frame bytes
-const MAX_FRAME_SIZE: usize = MAX_FRAME_CONTENT_SIZE + 3;
+/// `NOISE_FRAME_MAX_LEN` + (1..=3) frame bytes
+pub const MAX_FRAME_SIZE: usize = NOISE_FRAME_MAX_LEN + 3;
 
 /// Taken from tokio
 macro_rules! ready {
@@ -60,7 +61,7 @@ impl AsyncRead for Frame16TcpStream {
                 let pin = Pin::new(&mut *stream);
 
                 let explen = match extract_len(read_buffer.chunk()) {
-                    Ok(0) => {
+                    Ok((0, _)) => {
                         ready!(pin.poll_read(cx, &mut rb))?;
                         read_buffer.put_slice(rb.filled());
                         continue;
@@ -74,7 +75,7 @@ impl AsyncRead for Frame16TcpStream {
                     Err(_) => return Poll::Ready(Err(Error::from(ErrorKind::InvalidData))),
                 };
 
-                if read_buffer.len() < len + explen {
+                if read_buffer.len() < len + explen.0 {
                     ready!(pin.poll_read(cx, &mut rb))?;
                     read_buffer.put_slice(rb.filled());
                     continue;
@@ -86,7 +87,7 @@ impl AsyncRead for Frame16TcpStream {
         let buf = read_buffer.take().unwrap();
 
         let mut buf = buf.freeze();
-        buf.advance(explen);
+        buf.advance(explen.0);
         rbuf.put_slice(&buf.chunk()[..len]);
         buf.advance(len);
 
@@ -128,7 +129,7 @@ impl AsyncWrite for Frame16TcpStream {
                 return Poll::Ready(Ok(write_buffer.take().unwrap().0));
             }
 
-            if buf.len() > MAX_FRAME_CONTENT_SIZE {
+            if buf.len() > NOISE_FRAME_MAX_LEN {
                 return Poll::Ready(Err(Error::from(ErrorKind::InvalidData)));
             }
 
@@ -150,15 +151,18 @@ impl AsyncWrite for Frame16TcpStream {
     }
 }
 
-fn extract_len(slice: &[u8]) -> std::io::Result<usize> {
+pub(super) fn extract_len(slice: &[u8]) -> std::io::Result<(usize, usize)> {
     let len = slice.len().min(3);
+    let mut buf = 0usize;
     for (b, index) in (&slice[..len]).iter().zip(1..) {
+        buf <<= 7;
+        buf |= *b as usize & 0x7F;
         if *b < 0x80 {
-            return Ok(index);
+            return Ok((index, buf));
         }
     }
     match len >= 3 {
         true => Err(Error::from(ErrorKind::InvalidData)),
-        false => Ok(0),
+        false => Ok((0, 0)),
     }
 }
