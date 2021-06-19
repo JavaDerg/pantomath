@@ -6,9 +6,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
 /// max noise message len
-pub const NOISE_FRAME_MAX_LEN: usize = 65535;
+pub const NOISE_FRAME_MAX_LEN: usize = 0xFFFF;
 /// noise tag len
-pub const NOISE_TAG_LEN: usize = 16;
+pub const NOISE_TAG_LEN: usize = 0x10;
 
 /// `NOISE_FRAME_MAX_LEN` + (1..=3) frame bytes
 pub const MAX_FRAME_SIZE: usize = NOISE_FRAME_MAX_LEN + 3;
@@ -45,23 +45,23 @@ impl AsyncRead for Frame16TcpStream {
         cx: &mut Context<'_>,
         rbuf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let mut buf = [0u8; MAX_FRAME_SIZE];
-        let mut rb = ReadBuf::new(&mut buf);
-
         let Self {
             stream,
             read_buffer,
             ..
         } = self.get_mut();
 
-        let (explen, len) = {
+        let mut buf = [0u8; MAX_FRAME_SIZE + 3];
+
+        let (header_len, payload_len) = {
             let read_buffer = read_buffer.as_mut().unwrap();
 
             loop {
                 let pin = Pin::new(&mut *stream);
 
-                let explen = match extract_len(read_buffer.chunk()) {
+                let explen = match extract_len(read_buffer.chunk(), 3) {
                     Ok((0, _)) => {
+                        let mut rb = ReadBuf::new(&mut buf);
                         ready!(pin.poll_read(cx, &mut rb))?;
                         read_buffer.put_slice(rb.filled());
                         continue;
@@ -70,26 +70,22 @@ impl AsyncRead for Frame16TcpStream {
                     Err(err) => return Poll::Ready(Err(err)),
                 };
 
-                let len = match prost::decode_length_delimiter(read_buffer.chunk()) {
-                    Ok(len) => len,
-                    Err(_) => return Poll::Ready(Err(Error::from(ErrorKind::InvalidData))),
-                };
-
-                if read_buffer.len() < len + explen.0 {
+                if read_buffer.len() < explen.0 + explen.1 {
+                    let mut rb = ReadBuf::new(&mut buf);
                     ready!(pin.poll_read(cx, &mut rb))?;
                     read_buffer.put_slice(rb.filled());
                     continue;
                 }
 
-                break (explen, len);
+                break explen;
             }
         };
         let buf = read_buffer.take().unwrap();
 
         let mut buf = buf.freeze();
-        buf.advance(explen.0);
-        rbuf.put_slice(&buf.chunk()[..len]);
-        buf.advance(len);
+        buf.advance(header_len);
+        rbuf.put_slice(&buf.chunk()[..payload_len]);
+        buf.advance(payload_len);
 
         *read_buffer = Some(BytesMut::from(buf.chunk()));
 
@@ -151,17 +147,19 @@ impl AsyncWrite for Frame16TcpStream {
     }
 }
 
-pub(super) fn extract_len(slice: &[u8]) -> std::io::Result<(usize, usize)> {
-    let len = slice.len().min(3);
+pub(super) fn extract_len(slice: &[u8], max: usize) -> std::io::Result<(usize, usize)> {
+    let len = slice.len().min(max);
     let mut buf = 0usize;
     for (b, index) in (&slice[..len]).iter().zip(1..) {
-        buf <<= 7;
-        buf |= *b as usize & 0x7F;
-        if *b < 0x80 {
+        let b = *b as usize;
+        let bm = b & 0x7F;
+        let shift = bm << (7 * (index - 1));
+        buf |= shift;
+        if b < 0x80 {
             return Ok((index, buf));
         }
     }
-    match len >= 3 {
+    match len >= max {
         true => Err(Error::from(ErrorKind::InvalidData)),
         false => Ok((0, 0)),
     }

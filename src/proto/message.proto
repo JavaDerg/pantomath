@@ -3,5 +3,5 @@ syntax = "proto3";
 package proto.message;
 
 message Message {
-  string msg = 1;
+    string msg = 1;
 }

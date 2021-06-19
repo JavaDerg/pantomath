@@ -5,7 +5,7 @@ pub mod listener;
 use crate::config::Config;
 use crate::noise::framed::{extract_len, Frame16TcpStream, NOISE_FRAME_MAX_LEN, NOISE_TAG_LEN};
 use crate::noise::handshake::NoiseHandshake;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 pub use listener::NoiseListener;
 use snow::TransportState;
 use std::error::Error;
@@ -26,7 +26,7 @@ impl NoiseStream {
         Ok(NoiseHandshake::new(TcpStream::connect(addr).await?, config))
     }
 
-    pub async fn send<M: prost::Message>(&mut self, m: M) -> Result<(), Box<dyn Error>> {
+    pub async fn send(&mut self, m: &impl prost::Message) -> Result<(), Box<dyn Error>> {
         let mut buf = BytesMut::with_capacity(m.encoded_len());
         m.encode_length_delimited(&mut buf)?;
         let buf = buf.freeze();
@@ -42,11 +42,12 @@ impl NoiseStream {
     }
 
     pub async fn recv<M: prost::Message + Default>(&mut self) -> Result<M, Box<dyn Error>> {
-        let mut payload = [0u8; NOISE_FRAME_MAX_LEN];
+        let mut payload = [0u8; NOISE_FRAME_MAX_LEN - NOISE_TAG_LEN];
         let mut enc_buf = [0u8; NOISE_FRAME_MAX_LEN];
 
         let mut buf = BytesMut::new();
 
+        let mut explen = None;
         let (header_len, payload_len) = loop {
             let read = self.stream.read(&mut enc_buf[..]).await?;
             let len = self
@@ -54,9 +55,20 @@ impl NoiseStream {
                 .read_message(&enc_buf[..read], &mut payload[..])?;
             buf.put_slice(&payload[..len]);
 
-            let explen = extract_len(buf.chunk())?;
-            if explen.0 != 0 && explen.0 + explen.1 <= buf.remaining() {
-                break explen;
+            if explen.is_none() {
+                let el = extract_len(buf.chunk(), 10)?;
+                if el.0 == 0 {
+                    continue;
+                }
+                let tot = el.0 + el.1;
+                if tot > buf.len() {
+                    buf.reserve(tot - buf.len());
+                }
+                explen = Some(el);
+            }
+            let el = explen.unwrap();
+            if el.0 != 0 && el.0 + el.1 <= buf.len() {
+                break explen.take().unwrap();
             }
         };
 
