@@ -1,3 +1,11 @@
-pub mod message {
-    include!(concat!(env!("OUT_DIR"), "/proto.message.rs"));
+pub mod init {
+    include!(concat!(env!("OUT_DIR"), "/proto.init.rs"));
+}
+
+pub mod client {
+    include!(concat!(env!("OUT_DIR"), "/proto.client.rs"));
+}
+
+pub mod server {
+    include!(concat!(env!("OUT_DIR"), "/proto.server.rs"));
 }

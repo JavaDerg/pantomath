@@ -17,8 +17,6 @@ bytes = "^1.0.1"
 prost = "^0.7.0"
 arrayvec = "^0.7.1"
 
-crc32fast = "1.2.1"
-
 [dependencies.tokio]
 version = "^1.6.2"
 features = ["rt", "rt-multi-thread", "net", "macros", "fs", "io-util"]

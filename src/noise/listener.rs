@@ -1,28 +1,28 @@
-use crate::config::Config;
 use crate::noise::handshake::NoiseHandshake;
 use crate::noise::NoiseStream;
+use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, ToSocketAddrs};
 
 pub struct NoiseListener {
-    config: &'static Config,
-    listener: TcpListener,
+    inner: TcpListener,
+    pk: SecretKey,
 }
 
 impl NoiseListener {
-    pub async fn bind<A: ToSocketAddrs>(addr: A, config: &'static Config) -> std::io::Result<Self> {
+    pub async fn bind<A: ToSocketAddrs>(addr: A, pk: SecretKey) -> std::io::Result<Self> {
         Ok(Self {
-            config,
-            listener: TcpListener::bind(addr).await?,
+            inner: TcpListener::bind(addr).await?,
+            pk,
         })
     }
 
     // FIXME: Use better Error type
     pub async fn accept(&self) -> Result<(NoiseStream, SocketAddr), Box<dyn Error>> {
-        let client = self.listener.accept().await?;
+        let client = self.inner.accept().await?;
         Ok((
-            NoiseHandshake::new_priv(client.0, self.config)
+            NoiseHandshake::new_priv(client.0, &self.pk)
                 .shake_priv(false)
                 .await?,
             client.1,

@@ -1,34 +1,32 @@
-use crate::config::Config;
 use crate::noise::framed::{Frame16TcpStream, NOISE_FRAME_MAX_LEN};
 use crate::noise::NoiseStream;
+use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 pub struct NoiseHandshake {
-    config: &'static Config,
     stream: Frame16TcpStream,
     state: snow::HandshakeState,
 }
 
 impl NoiseHandshake {
-    pub fn new(client: TcpStream, config: &'static Config) -> Self {
+    pub fn new(client: TcpStream, private_key: Option<&SecretKey>) -> Self {
+        let mut builder = snow::Builder::new("Noise_NN_25519_ChaChaPoly_BLAKE2s".parse().unwrap());
+        if let Some(pk) = private_key {
+            builder = builder.local_private_key(&pk.0[..]);
+        }
         NoiseHandshake {
-            config,
             stream: Frame16TcpStream::new(client),
-            state: snow::Builder::new("Noise_NN_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
-                .local_private_key(&config.keypair.private[..])
-                .build_initiator()
-                .unwrap(),
+            state: builder.build_initiator().unwrap(),
         }
     }
 
-    pub(super) fn new_priv(client: TcpStream, config: &'static Config) -> Self {
+    pub(super) fn new_priv(client: TcpStream, pk: &SecretKey) -> Self {
         NoiseHandshake {
-            config,
             stream: Frame16TcpStream::new(client),
             state: snow::Builder::new("Noise_NN_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
-                .local_private_key(&config.keypair.private[..])
+                .local_private_key(&pk.0[..])
                 .build_responder()
                 .unwrap(),
         }
@@ -60,7 +58,6 @@ impl NoiseHandshake {
         Ok(NoiseStream {
             stream: self.stream,
             noise: self.state.into_transport_mode()?,
-            config: self.config,
         })
     }
 }

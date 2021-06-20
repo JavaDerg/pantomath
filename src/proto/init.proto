@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package proto.init;
+
+message Hello {
+    oneof kind {
+        ClientHello client = 1;
+        ServerHello server = 2;
+    }
+}
+
+message ClientHello {
+
+}
+
+message ServerHello {
+
+}
