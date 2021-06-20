@@ -1,6 +1,7 @@
 pub mod framed;
 mod handshake;
 pub mod listener;
+mod channel;
 
 pub use listener::NoiseListener;
 

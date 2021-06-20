@@ -16,6 +16,7 @@ toml = "^0.5.8"
 bytes = "^1.0.1"
 prost = "^0.7.0"
 arrayvec = "^0.7.1"
+flume = "^0.10.7"
 
 [dependencies.tokio]
 version = "^1.6.2"

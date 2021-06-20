@@ -10,7 +10,9 @@ message Hello {
 }
 
 message ClientHello {
-
+    bytes x_pubkey = 1;
+    bytes ed_pubkey = 2;
+    bytes proof = 3;
 }
 
 message ServerHello {
