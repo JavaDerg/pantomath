@@ -4,6 +4,7 @@ use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use crate::error::StreamError;
 
 pub struct NoiseHandshake {
     stream: Frame16TcpStream,
@@ -32,13 +33,11 @@ impl NoiseHandshake {
         }
     }
 
-    // FIXME: Use better Error type
-    pub async fn shake(self) -> Result<NoiseStream, Box<dyn Error>> {
+    pub async fn shake(self) -> Result<NoiseStream, StreamError> {
         self.shake_priv(true).await
     }
 
-    // FIXME: Use better Error type
-    pub(super) async fn shake_priv(mut self, client: bool) -> Result<NoiseStream, Box<dyn Error>> {
+    pub(super) async fn shake_priv(mut self, client: bool) -> Result<NoiseStream, StreamError> {
         let mut s_buf = [0u8; NOISE_FRAME_MAX_LEN];
         let mut n_buf = [0u8; NOISE_FRAME_MAX_LEN];
         if client {

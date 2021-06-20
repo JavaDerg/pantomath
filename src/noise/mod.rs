@@ -13,6 +13,7 @@ use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
+use crate::error::StreamError;
 
 pub struct NoiseStream {
     stream: Frame16TcpStream,
@@ -30,7 +31,7 @@ impl NoiseStream {
         ))
     }
 
-    pub async fn send(&mut self, m: &impl prost::Message) -> Result<(), Box<dyn Error>> {
+    pub async fn send(&mut self, m: &impl prost::Message) -> Result<(), StreamError> {
         let mut buf = BytesMut::with_capacity(m.encoded_len());
         m.encode_length_delimited(&mut buf)?;
         let buf = buf.freeze();
@@ -45,7 +46,7 @@ impl NoiseStream {
         Ok(())
     }
 
-    pub async fn recv<M: prost::Message + Default>(&mut self) -> Result<M, Box<dyn Error>> {
+    pub async fn recv<M: prost::Message + Default>(&mut self) -> Result<M, StreamError> {
         let mut payload = [0u8; NOISE_FRAME_MAX_LEN - NOISE_TAG_LEN];
         let mut enc_buf = [0u8; NOISE_FRAME_MAX_LEN];
 

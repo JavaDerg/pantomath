@@ -4,6 +4,7 @@ use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, ToSocketAddrs};
+use crate::error::StreamError;
 
 pub struct NoiseListener {
     inner: TcpListener,
@@ -18,8 +19,7 @@ impl NoiseListener {
         })
     }
 
-    // FIXME: Use better Error type
-    pub async fn accept(&self) -> Result<(NoiseStream, SocketAddr), Box<dyn Error>> {
+    pub async fn accept(&self) -> Result<(NoiseStream, SocketAddr), StreamError> {
         let client = self.inner.accept().await?;
         Ok((
             NoiseHandshake::new_priv(client.0, &self.pk)
