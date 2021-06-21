@@ -16,3 +16,13 @@ pub enum StreamError {
     #[error(display = "failed to encode packet")]
     EncodeError(#[error(source)] EncodeError),
 }
+
+#[derive(Debug, Error)]
+pub enum ChannelError {
+    #[error(display = "failed to decode packet")]
+    DecodeError(#[error(source)] DecodeError),
+    #[error(display = "failed to encode packet")]
+    EncodeError(#[error(source)] EncodeError),
+    #[error(display = "some error occurred")]
+    Dyn(#[error(source)] Box<dyn Error>),
+}

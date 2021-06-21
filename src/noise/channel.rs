@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use flume::{Receiver, Sender};
+use crate::error::ChannelError;
 
 pub struct NoiseChannel {
     sender: Sender<Bytes>,
@@ -7,7 +8,15 @@ pub struct NoiseChannel {
 }
 
 pub enum Control {
-    Fail()
+    Message(Bytes),
+    Failure(ChannelError, FailureResolution),
+    Eof,
+}
+
+pub enum FailureResolution {
+    Ignore,
+    CloseChannel,
+    CloseConnection,
 }
 
 struct InternalNoiseChannel {
