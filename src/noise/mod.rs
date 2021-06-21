@@ -1,10 +1,11 @@
+mod channel;
 pub mod framed;
 mod handshake;
 pub mod listener;
-mod channel;
 
 pub use listener::NoiseListener;
 
+use crate::error::StreamError;
 use crate::noise::framed::{extract_len, Frame16TcpStream, NOISE_FRAME_MAX_LEN, NOISE_TAG_LEN};
 use crate::noise::handshake::NoiseHandshake;
 use bytes::{Buf, BufMut, BytesMut};
@@ -13,11 +14,21 @@ use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
-use crate::error::StreamError;
+use crate::noise::channel::IntNoiseChannel;
+
+macro_rules! array {
+    ([$value:stmt; $count:literal]) => {
+        [array($count, $value)]
+    }
+    ($count:literal, $value:stmt) => {
+        $value, array!($count - 1, $value),
+    }
+}
 
 pub struct NoiseStream {
     stream: Frame16TcpStream,
     noise: TransportState,
+    channels: [Option<IntNoiseChannel>; 0x100],
 }
 
 impl NoiseStream {

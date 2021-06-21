@@ -1,10 +1,16 @@
+use crate::error::ChannelError;
 use bytes::Bytes;
 use flume::{Receiver, Sender};
-use crate::error::ChannelError;
 
 pub struct NoiseChannel {
-    sender: Sender<Bytes>,
-    receiver: Receiver<Bytes>,
+    sender: Sender<Control>,
+    receiver: Receiver<Result<Bytes, ()>>,
+    id: u8,
+}
+
+pub(crate) struct IntNoiseChannel {
+    sender: Sender<Result<Bytes, ()>>,
+    receiver: Receiver<Control>,
 }
 
 pub enum Control {
@@ -25,16 +31,19 @@ struct InternalNoiseChannel {
 }
 
 impl NoiseChannel {
-    pub fn new(sender: Sender<Bytes>, receiver: Receiver<Bytes>) -> Self {
-        Self {
-            receiver,
-            sender
-        }
-    }
-
-    pub fn new_pair() -> (Self, Self) {
+    pub(super) fn new_pair(id: u8) -> (Self, IntNoiseChannel) {
         let (p1s, p1r) = flume::unbounded();
         let (p2s, p2r) = flume::unbounded();
-        (Self::new(p1s, p2r), Self::new(p2s, p1r))
+        (
+            Self {
+                sender: p1s,
+                receiver: p2r,
+                id,
+            },
+            IntNoiseChannel {
+                sender: p2s,
+                receiver: p1r,
+            },
+        )
     }
 }

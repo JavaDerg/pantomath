@@ -1,10 +1,10 @@
+use crate::error::StreamError;
 use crate::noise::handshake::NoiseHandshake;
 use crate::noise::NoiseStream;
 use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, ToSocketAddrs};
-use crate::error::StreamError;
 
 pub struct NoiseListener {
     inner: TcpListener,

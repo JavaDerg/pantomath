@@ -1,9 +1,9 @@
-use std::error::Error;
 use err_derive::Error;
+use std::error::Error;
 
-use std::io::Error as IoError;
+use prost::{DecodeError, EncodeError};
 use snow::Error as NoiseError;
-use prost::{EncodeError, DecodeError};
+use std::io::Error as IoError;
 
 #[derive(Debug, Error)]
 pub enum StreamError {

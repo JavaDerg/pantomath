@@ -1,10 +1,10 @@
+use crate::error::StreamError;
 use crate::noise::framed::{Frame16TcpStream, NOISE_FRAME_MAX_LEN};
 use crate::noise::NoiseStream;
 use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use crate::error::StreamError;
 
 pub struct NoiseHandshake {
     stream: Frame16TcpStream,
