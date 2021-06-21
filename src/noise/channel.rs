@@ -4,13 +4,16 @@ use flume::{Receiver, Sender};
 
 pub struct NoiseChannel {
     sender: Sender<Control>,
-    receiver: Receiver<Result<Bytes, ()>>,
-    id: u8,
+    receiver: Receiver<Bytes>,
+    id: ChannelId,
 }
 
+#[derive(Eq, PartialEq, Copy, Clone)]
+pub struct ChannelId(pub(super) u8);
+
 pub(crate) struct IntNoiseChannel {
-    sender: Sender<Result<Bytes, ()>>,
-    receiver: Receiver<Control>,
+    pub sender: Sender<Bytes>,
+    pub receiver: Receiver<Control>,
 }
 
 pub enum Control {
@@ -31,7 +34,7 @@ struct InternalNoiseChannel {
 }
 
 impl NoiseChannel {
-    pub(super) fn new_pair(id: u8) -> (Self, IntNoiseChannel) {
+    pub(super) fn new_pair(id: ChannelId) -> (Self, IntNoiseChannel) {
         let (p1s, p1r) = flume::unbounded();
         let (p2s, p2r) = flume::unbounded();
         (

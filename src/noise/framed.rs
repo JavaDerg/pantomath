@@ -5,11 +5,14 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
+/// Length of channel id in message
+pub const CHANNEL_ID_LEN: usize = 0x1;
 /// max noise message len
 pub const NOISE_FRAME_MAX_LEN: usize = 0xFFFF;
 /// noise tag len
 pub const NOISE_TAG_LEN: usize = 0x10;
-
+/// The maximum length a payload can have before its to large to send in on packet
+pub const MAX_PAYLOAD_LEN: usize = NOISE_FRAME_MAX_LEN - NOISE_TAG_LEN;
 /// `NOISE_FRAME_MAX_LEN` + (1..=3) frame bytes
 pub const MAX_FRAME_SIZE: usize = NOISE_FRAME_MAX_LEN + 3;
 

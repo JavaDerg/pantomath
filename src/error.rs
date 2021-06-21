@@ -1,6 +1,6 @@
 use err_derive::Error;
-use std::error::Error;
 
+use bytes::Bytes;
 use prost::{DecodeError, EncodeError};
 use snow::Error as NoiseError;
 use std::io::Error as IoError;
@@ -12,7 +12,7 @@ pub enum StreamError {
     #[error(display = "failed to encrypt/decrypt data")]
     NoiseError(#[error(source)] NoiseError),
     #[error(display = "failed to decode packet")]
-    DecodeError(#[error(source)] DecodeError),
+    DecodeError(#[error(source)] DecodeError, Bytes),
     #[error(display = "failed to encode packet")]
     EncodeError(#[error(source)] EncodeError),
 }
@@ -20,9 +20,7 @@ pub enum StreamError {
 #[derive(Debug, Error)]
 pub enum ChannelError {
     #[error(display = "failed to decode packet")]
-    DecodeError(#[error(source)] DecodeError),
+    DecodeError(#[error(source)] DecodeError, Bytes),
     #[error(display = "failed to encode packet")]
     EncodeError(#[error(source)] EncodeError),
-    #[error(display = "some error occurred")]
-    Dyn(#[error(source)] Box<dyn Error>),
 }
