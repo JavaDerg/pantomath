@@ -2,6 +2,7 @@ use pantomath::noise::NoiseListener;
 use pantomath::proto::init::hello::Kind as HelloKind;
 use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
+use std::time::Instant;
 use tracing::Instrument;
 
 mod config;

@@ -1,7 +1,7 @@
 use crate::error::StreamError;
 use crate::noise::channel::IntNoiseChannel;
 use crate::noise::framed::{Frame16TcpStream, NOISE_FRAME_MAX_LEN};
-use crate::noise::NoiseStream;
+use crate::noise::{InnerNoiseStream, MaybeOwned, NoiseStream};
 use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -57,10 +57,10 @@ impl NoiseHandshake {
             self.stream.write(&s_buf[..len]).await?;
         }
 
-        Ok(NoiseStream {
+        Ok(NoiseStream(MaybeOwned::Owned(InnerNoiseStream {
             stream: self.stream,
             noise: self.state.into_transport_mode()?,
-            channels: [ICH_NONE; 256],
-        })
+            channels: [ICH_NONE; 0xFF],
+        })))
     }
 }

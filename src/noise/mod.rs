@@ -14,14 +14,25 @@ use crate::noise::handshake::NoiseHandshake;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use snow::TransportState;
 use sodiumoxide::crypto::box_::SecretKey;
+use std::future::Future;
+use std::mem::{forget, swap, MaybeUninit};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::sync::{Mutex, MutexGuard};
 
-pub struct NoiseStream {
+pub struct NoiseStream(MaybeOwned<InnerNoiseStream>);
+
+struct InnerNoiseStream {
     stream: Frame16TcpStream,
     noise: TransportState,
     // channel id 255 is reserved for protocol messages only
     channels: [Option<IntNoiseChannel>; 0xFF],
+}
+
+enum MaybeOwned<T> {
+    Owned(T),
+    Shared(Arc<Mutex<T>>),
 }
 
 impl NoiseStream {
@@ -37,6 +48,40 @@ impl NoiseStream {
 
     /// Sends a encrypted message to the other peer on the specified channel
     /// Use `NoiseChannel` over this function
+    pub async fn send(
+        &mut self,
+        m: &impl prost::Message,
+        id: ChannelId,
+    ) -> Result<(), StreamError> {
+        self.inner_mut(|inner| inner.send(m, id))
+    }
+
+    async fn send_raw(&mut self, payload: &[u8]) -> Result<(), StreamError> {
+        self.inner_mut(|inner| inner.send_raw(payload))
+    }
+
+    /// Receives a encrypted message from the other peer on the specified channel and decodes it into `M` where `M: prost::Message + Default`,
+    /// Use `NoiseChannel` over this function
+    pub async fn recv<M: prost::Message + Default>(
+        &mut self,
+        id: ChannelId,
+    ) -> Result<M, StreamError> {
+        self.inner_mut(|inner| inner.recv(id))
+    }
+
+    async fn inner_mut<M, C, F>(&mut self, f: C) -> M
+    where
+        C: FnOnce(&mut InnerNoiseStream) -> F,
+        F: Future<Output = Result<M, StreamError>>,
+    {
+        match &mut self.0 {
+            MaybeOwned::Owned(inner) => c(inner).await,
+            MaybeOwned::Shared(mutex) => c(mutex.lock().await).await,
+        }
+    }
+}
+
+impl InnerNoiseStream {
     pub async fn send(
         &mut self,
         m: &impl prost::Message,
@@ -59,8 +104,6 @@ impl NoiseStream {
         Ok(())
     }
 
-    /// Receives a encrypted message from the other peer on the specified channel and decodes it into `M` where `M: prost::Message + Default`,
-    /// Use `NoiseChannel` over this function
     pub async fn recv<M: prost::Message + Default>(
         &mut self,
         id: ChannelId,
@@ -136,5 +179,23 @@ impl NoiseStream {
 
             break M::decode(buf).map_err(|err| StreamError::DecodeError(err, fail_buf));
         }
+    }
+}
+
+impl<T> MaybeOwned<T> {
+    pub fn make_shared(&mut self) {
+        if let Self::Shared(_) = self {
+            return;
+        }
+        // SAFETY: We make sure to not use self after the swap and forget the uninitialized value to avoid issues with `Drop`
+        let mut uninit = unsafe { MaybeUninit::uninit().assume_init() };
+        swap(self, &mut uninit);
+        // SAFETY: uninit contains self now!
+        match uninit {
+            MaybeOwned::Owned(t) => uninit = MaybeOwned::Shared(Arc::new(Mutex::new(t))),
+            MaybeOwned::Shared(_) => unreachable!(),
+        }
+        swap(self, &mut uninit);
+        forget(uninit);
     }
 }
