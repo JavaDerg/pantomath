@@ -6,16 +6,18 @@ pub mod listener;
 pub use listener::NoiseListener;
 
 use crate::error::StreamError;
-use crate::noise::channel::{ChannelId, IntNoiseChannel};
+use crate::noise::channel::{ChannelId, Control, IntNoiseChannel};
 use crate::noise::framed::{
     extract_len, Frame16TcpStream, MAX_PAYLOAD_LEN, NOISE_FRAME_MAX_LEN, NOISE_TAG_LEN,
 };
 use crate::noise::handshake::NoiseHandshake;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use flume::TryRecvError;
 use snow::TransportState;
 use sodiumoxide::crypto::box_::SecretKey;
 use std::future::Future;
 use std::mem::{forget, swap, MaybeUninit};
+use std::ops::DerefMut;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
@@ -53,11 +55,11 @@ impl NoiseStream {
         m: &impl prost::Message,
         id: ChannelId,
     ) -> Result<(), StreamError> {
-        self.inner_mut(|inner| inner.send(m, id))
+        self.inner_mut(|inner| inner.send(m, id)).await
     }
 
     async fn send_raw(&mut self, payload: &[u8]) -> Result<(), StreamError> {
-        self.inner_mut(|inner| inner.send_raw(payload))
+        self.inner_mut(|inner| inner.send_raw(payload)).await
     }
 
     /// Receives a encrypted message from the other peer on the specified channel and decodes it into `M` where `M: prost::Message + Default`,
@@ -65,18 +67,21 @@ impl NoiseStream {
     pub async fn recv<M: prost::Message + Default>(
         &mut self,
         id: ChannelId,
-    ) -> Result<M, StreamError> {
-        self.inner_mut(|inner| inner.recv(id))
+    ) -> Result<Option<M>, StreamError> {
+        self.inner_mut(|inner| inner.recv(id)).await
     }
 
-    async fn inner_mut<M, C, F>(&mut self, f: C) -> M
+    async fn inner_mut<'a, M, C, F>(&'a mut self, f: C) -> M
     where
         C: FnOnce(&mut InnerNoiseStream) -> F,
-        F: Future<Output = Result<M, StreamError>>,
+        F: Future<Output = M> + 'a,
     {
         match &mut self.0 {
-            MaybeOwned::Owned(inner) => c(inner).await,
-            MaybeOwned::Shared(mutex) => c(mutex.lock().await).await,
+            MaybeOwned::Owned(inner) => f(inner).await,
+            MaybeOwned::Shared(mutex) => {
+                let mut guard = mutex.lock().await;
+                f(guard.deref_mut()).await
+            }
         }
     }
 }
@@ -107,8 +112,21 @@ impl InnerNoiseStream {
     pub async fn recv<M: prost::Message + Default>(
         &mut self,
         id: ChannelId,
-    ) -> Result<M, StreamError> {
+    ) -> Result<Option<M>, StreamError> {
         if let Some(ch) = &self.channels[id.0 as usize] {
+            match ch.receiver.try_recv() {
+                Ok(Control::Message(msg)) => {
+                    return M::decode(msg.clone())
+                        .map(|m| Some(m))
+                        .map_err(|err| StreamError::DecodeError(err, msg))
+                }
+                Ok(Control::Eof) => return Ok(None),
+                Err(TryRecvError::Disconnected) => {
+                    // Found dead channel but received packet, sending heads up to peer
+                    self.send_raw(&[id.0, 0][..]).await?;
+                }
+                _ => (),
+            }
             // TODO
         }
 
@@ -177,7 +195,9 @@ impl InnerNoiseStream {
                 continue;
             }
 
-            break M::decode(buf).map_err(|err| StreamError::DecodeError(err, fail_buf));
+            break M::decode(buf)
+                .map(|m| Some(m))
+                .map_err(|err| StreamError::DecodeError(err, fail_buf));
         }
     }
 }
