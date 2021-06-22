@@ -15,13 +15,12 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flume::TryRecvError;
 use snow::TransportState;
 use sodiumoxide::crypto::box_::SecretKey;
-use std::future::Future;
-use std::mem::{forget, swap, MaybeUninit};
+use std::mem::{forget, swap, ManuallyDrop, MaybeUninit};
 use std::ops::DerefMut;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::Mutex;
 
 pub struct NoiseStream(MaybeOwned<InnerNoiseStream>);
 
@@ -55,11 +54,17 @@ impl NoiseStream {
         m: &impl prost::Message,
         id: ChannelId,
     ) -> Result<(), StreamError> {
-        self.inner_mut(|inner| inner.send(m, id)).await
+        match &mut self.0 {
+            MaybeOwned::Owned(inner) => inner.send(m, id).await,
+            MaybeOwned::Shared(mutex) => mutex.lock().await.send(m, id).await,
+        }
     }
 
     async fn send_raw(&mut self, payload: &[u8]) -> Result<(), StreamError> {
-        self.inner_mut(|inner| inner.send_raw(payload)).await
+        match &mut self.0 {
+            MaybeOwned::Owned(inner) => inner.send_raw(payload).await,
+            MaybeOwned::Shared(mutex) => mutex.lock().await.send_raw(payload).await,
+        }
     }
 
     /// Receives a encrypted message from the other peer on the specified channel and decodes it into `M` where `M: prost::Message + Default`,
@@ -68,20 +73,9 @@ impl NoiseStream {
         &mut self,
         id: ChannelId,
     ) -> Result<Option<M>, StreamError> {
-        self.inner_mut(|inner| inner.recv(id)).await
-    }
-
-    async fn inner_mut<'a, M, C, F>(&'a mut self, f: C) -> M
-    where
-        C: FnOnce(&mut InnerNoiseStream) -> F,
-        F: Future<Output = M> + 'a,
-    {
         match &mut self.0 {
-            MaybeOwned::Owned(inner) => f(inner).await,
-            MaybeOwned::Shared(mutex) => {
-                let mut guard = mutex.lock().await;
-                f(guard.deref_mut()).await
-            }
+            MaybeOwned::Owned(inner) => inner.recv(id).await,
+            MaybeOwned::Shared(mutex) => mutex.lock().await.recv(id).await,
         }
     }
 }
@@ -196,7 +190,7 @@ impl InnerNoiseStream {
             }
 
             break M::decode(buf)
-                .map(|m| Some(m))
+                .map(Some)
                 .map_err(|err| StreamError::DecodeError(err, fail_buf));
         }
     }
@@ -204,18 +198,26 @@ impl InnerNoiseStream {
 
 impl<T> MaybeOwned<T> {
     pub fn make_shared(&mut self) {
-        if let Self::Shared(_) = self {
-            return;
+        // We later write a _valid_ instance here but one that isn't safe to access.
+        let mut slot: ManuallyDrop<Self>;
+        match self {
+            Self::Shared(_) => return,
+            Self::Owned(that) => {
+                let mut mutex: Arc<Mutex<MaybeUninit<T>>> =
+                    Arc::new(Mutex::new(MaybeUninit::uninit()));
+                let inner = Arc::get_mut(&mut mutex).unwrap().get_mut();
+                // Prepare the logical move, initializing the inner of mutex in the process.
+                unsafe { core::ptr::copy(that, inner as *mut _ as *mut T, 1) };
+                // This is slightly iffy because we allow Arc to access the instance. It is valid, but not yet safe to do so.
+                // However, Arc doesn't actually access it or dereference the pointer in any way.
+                let instance =
+                    Self::Shared(unsafe { Arc::from_raw(Arc::into_raw(mutex) as *mut Mutex<T>) });
+                slot = ManuallyDrop::new(instance);
+            }
         }
-        // SAFETY: We make sure to not use self after the swap and forget the uninitialized value to avoid issues with `Drop`
-        let mut uninit = unsafe { MaybeUninit::uninit().assume_init() };
-        swap(self, &mut uninit);
-        // SAFETY: uninit contains self now!
-        match uninit {
-            MaybeOwned::Owned(t) => uninit = MaybeOwned::Shared(Arc::new(Mutex::new(t))),
-            MaybeOwned::Shared(_) => unreachable!(),
-        }
-        swap(self, &mut uninit);
-        forget(uninit);
+        // Important: nothing here panics so we don't leak anything inside the manually drop.
+        // Promote the valid but unsafe instance to the active one.
+        // This completes the 'move' of inner into the arc of `slot`.
+        core::mem::swap(self, &mut *slot);
     }
 }
