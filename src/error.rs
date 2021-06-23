@@ -15,6 +15,8 @@ pub enum StreamError {
     DecodeError(#[error(source)] DecodeError, Bytes),
     #[error(display = "failed to encode packet")]
     EncodeError(#[error(source)] EncodeError),
+    #[error(display = "channel specific error occurred")]
+    ChannelError(#[error(source)] ChannelError),
 }
 
 #[derive(Debug, Error)]

@@ -9,3 +9,7 @@ pub mod client {
 pub mod server {
     include!(concat!(env!("OUT_DIR"), "/proto.server.rs"));
 }
+
+pub mod protocol {
+    include!(concat!(env!("OUT_DIR"), "/proto.protocol.rs"));
+}

@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package proto.protocol;
+
+message MakeChannel {
+    // is actually u8, does NOT support any other values, CHECK!
+    uint32 id = 1;
+}

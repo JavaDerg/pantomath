@@ -9,7 +9,7 @@ pub struct NoiseChannel {
 }
 
 #[derive(Eq, PartialEq, Copy, Clone)]
-pub struct ChannelId(pub(super) u8);
+pub struct ChannelId(pub u8);
 
 pub(crate) struct IntNoiseChannel {
     pub sender: Sender<Bytes>,

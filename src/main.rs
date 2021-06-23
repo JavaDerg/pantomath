@@ -1,4 +1,5 @@
-use pantomath::noise::NoiseListener;
+use pantomath::noise::channel::ChannelId;
+use pantomath::noise::{NoiseListener, NoiseStream};
 use pantomath::proto::init::hello::Kind as HelloKind;
 use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
@@ -21,6 +22,15 @@ async fn main() {
         .await
         .unwrap();
 
+    tokio::spawn(async {
+        let stream = NoiseStream::connect("127.0.0.1:1337", None)
+            .await
+            .unwrap()
+            .shake()
+            .await
+            .unwrap();
+    });
+
     loop {
         let (mut stream, ip_addr) = match listener.accept().await {
             Ok(client) => client,
@@ -32,8 +42,11 @@ async fn main() {
         tokio::spawn(
             async move {
                 let result: Result<(), Box<dyn Error>> = async move {
-                    let handshake = stream.recv::<pantomath::proto::init::Hello>().await?;
+                    let handshake = stream
+                        .recv::<pantomath::proto::init::Hello>(ChannelId(0))
+                        .await?;
                     match handshake
+                        .unwrap()
                         .kind
                         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?
                     {

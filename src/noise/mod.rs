@@ -1,4 +1,4 @@
-mod channel;
+pub mod channel;
 pub mod framed;
 mod handshake;
 pub mod listener;
@@ -6,7 +6,7 @@ pub mod listener;
 pub use listener::NoiseListener;
 
 use crate::error::StreamError;
-use crate::noise::channel::{ChannelId, Control, IntNoiseChannel};
+use crate::noise::channel::{ChannelId, Control, FailureResolution, IntNoiseChannel};
 use crate::noise::framed::{
     extract_len, Frame16TcpStream, MAX_PAYLOAD_LEN, NOISE_FRAME_MAX_LEN, NOISE_TAG_LEN,
 };
@@ -34,6 +34,7 @@ struct InnerNoiseStream {
 enum MaybeOwned<T> {
     Owned(T),
     Shared(Arc<Mutex<T>>),
+    Dead,
 }
 
 impl NoiseStream {
@@ -115,6 +116,14 @@ impl InnerNoiseStream {
                         .map_err(|err| StreamError::DecodeError(err, msg))
                 }
                 Ok(Control::Eof) => return Ok(None),
+                Ok(Control::Failure(err, res)) => {
+                    match res {
+                        FailureResolution::Ignore => (),
+                        FailureResolution::CloseChannel => self.send_raw(&[id.0, 0][..]).await?,
+                        FailureResolution::CloseConnection =>
+                    }
+                    return Err(err)?;
+                }
                 Err(TryRecvError::Disconnected) => {
                     // Found dead channel but received packet, sending heads up to peer
                     self.send_raw(&[id.0, 0][..]).await?;
