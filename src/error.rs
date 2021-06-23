@@ -17,6 +17,8 @@ pub enum StreamError {
     EncodeError(#[error(source)] EncodeError),
     #[error(display = "channel specific error occurred")]
     ChannelError(#[error(source)] ChannelError),
+    #[error(display = "stream is already closed")]
+    AlreadyClosed,
 }
 
 #[derive(Debug, Error)]

@@ -16,13 +16,12 @@ use flume::TryRecvError;
 use snow::TransportState;
 use sodiumoxide::crypto::box_::SecretKey;
 use std::mem::{forget, swap, ManuallyDrop, MaybeUninit};
-use std::ops::DerefMut;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::sync::Mutex;
 
-pub struct NoiseStream(MaybeOwned<InnerNoiseStream>);
+pub struct NoiseStream(MaybeShared<InnerNoiseStream>);
 
 struct InnerNoiseStream {
     stream: Frame16TcpStream,
@@ -31,9 +30,9 @@ struct InnerNoiseStream {
     channels: [Option<IntNoiseChannel>; 0xFF],
 }
 
-enum MaybeOwned<T> {
+enum MaybeShared<T> {
     Owned(T),
-    Shared(Arc<Mutex<T>>),
+    Shared(Arc<Mutex<Option<T>>>),
     Dead,
 }
 
@@ -56,15 +55,10 @@ impl NoiseStream {
         id: ChannelId,
     ) -> Result<(), StreamError> {
         match &mut self.0 {
-            MaybeOwned::Owned(inner) => inner.send(m, id).await,
-            MaybeOwned::Shared(mutex) => mutex.lock().await.send(m, id).await,
-        }
-    }
-
-    async fn send_raw(&mut self, payload: &[u8]) -> Result<(), StreamError> {
-        match &mut self.0 {
-            MaybeOwned::Owned(inner) => inner.send_raw(payload).await,
-            MaybeOwned::Shared(mutex) => mutex.lock().await.send_raw(payload).await,
+            MaybeShared::Owned(inner) => inner.send(m, id).await,
+            // FIXME: This crashes if the shared stream seized to exist
+            MaybeShared::Shared(mutex) => mutex.lock().await.as_mut().unwrap().send(m, id).await,
+            MaybeShared::Dead => Err(StreamError::AlreadyClosed),
         }
     }
 
@@ -75,8 +69,10 @@ impl NoiseStream {
         id: ChannelId,
     ) -> Result<Option<M>, StreamError> {
         match &mut self.0 {
-            MaybeOwned::Owned(inner) => inner.recv(id).await,
-            MaybeOwned::Shared(mutex) => mutex.lock().await.recv(id).await,
+            MaybeShared::Owned(inner) => inner.recv(id).await,
+            // FIXME: This crashes if the shared stream seized to exist
+            MaybeShared::Shared(mutex) => mutex.lock().await.as_mut().unwrap().recv(id).await,
+            MaybeShared::Dead => Ok(None),
         }
     }
 }
@@ -120,7 +116,7 @@ impl InnerNoiseStream {
                     match res {
                         FailureResolution::Ignore => (),
                         FailureResolution::CloseChannel => self.send_raw(&[id.0, 0][..]).await?,
-                        FailureResolution::CloseConnection =>
+                        FailureResolution::CloseConnection => todo!("Notify all channels and set inner shared state to None and inner state to Dead"),
                     }
                     return Err(err)?;
                 }
@@ -205,28 +201,18 @@ impl InnerNoiseStream {
     }
 }
 
-impl<T> MaybeOwned<T> {
+impl<T> MaybeShared<T> {
     pub fn make_shared(&mut self) {
-        // We later write a _valid_ instance here but one that isn't safe to access.
-        let mut slot: ManuallyDrop<Self>;
-        match self {
-            Self::Shared(_) => return,
-            Self::Owned(that) => {
-                let mut mutex: Arc<Mutex<MaybeUninit<T>>> =
-                    Arc::new(Mutex::new(MaybeUninit::uninit()));
-                let inner = Arc::get_mut(&mut mutex).unwrap().get_mut();
-                // Prepare the logical move, initializing the inner of mutex in the process.
-                unsafe { core::ptr::copy(that, inner as *mut _ as *mut T, 1) };
-                // This is slightly iffy because we allow Arc to access the instance. It is valid, but not yet safe to do so.
-                // However, Arc doesn't actually access it or dereference the pointer in any way.
-                let instance =
-                    Self::Shared(unsafe { Arc::from_raw(Arc::into_raw(mutex) as *mut Mutex<T>) });
-                slot = ManuallyDrop::new(instance);
-            }
+        if matches!(self, Self::Dead | Self::Shared(_)) {
+            return;
         }
-        // Important: nothing here panics so we don't leak anything inside the manually drop.
-        // Promote the valid but unsafe instance to the active one.
-        // This completes the 'move' of inner into the arc of `slot`.
-        core::mem::swap(self, &mut *slot);
+        let mut this = Self::Dead;
+        swap(self, &mut this);
+        let t = match this {
+            MaybeShared::Owned(t) => t,
+            _ => unreachable!(),
+        };
+        this = Self::Shared(Arc::new(Mutex::new(Some(t))));
+        swap(self, &mut this);
     }
 }
