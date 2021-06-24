@@ -11,8 +11,10 @@ use crate::noise::framed::{
     extract_len, Frame16TcpStream, MAX_PAYLOAD_LEN, NOISE_FRAME_MAX_LEN, NOISE_TAG_LEN,
 };
 use crate::noise::handshake::NoiseHandshake;
+use crate::noise::Soon::Now;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flume::TryRecvError;
+use prost::Message;
 use snow::TransportState;
 use sodiumoxide::crypto::box_::SecretKey;
 use std::mem::{forget, swap, ManuallyDrop, MaybeUninit};
@@ -27,13 +29,19 @@ struct InnerNoiseStream {
     stream: Frame16TcpStream,
     noise: TransportState,
     // channel id 255 is reserved for protocol messages only
-    channels: [Option<IntNoiseChannel>; 0xFF],
+    channels: [Soon<IntNoiseChannel, IntNoiseChannel>; 0xFF],
 }
 
 enum MaybeShared<T> {
     Owned(T),
     Shared(Arc<Mutex<Option<T>>>),
     Dead,
+}
+
+enum Soon<N, S> {
+    Now(N),
+    Soon(S),
+    None,
 }
 
 impl NoiseStream {
@@ -55,11 +63,16 @@ impl NoiseStream {
         id: ChannelId,
     ) -> Result<(), StreamError> {
         match &mut self.0 {
-            MaybeShared::Owned(inner) => inner.send(m, id).await,
-            // FIXME: This crashes if the shared stream seized to exist
-            MaybeShared::Shared(mutex) => mutex.lock().await.as_mut().unwrap().send(m, id).await,
-            MaybeShared::Dead => Err(StreamError::AlreadyClosed),
+            MaybeShared::Owned(inner) => return inner.send(m, id).await,
+            MaybeShared::Shared(mutex) => match mutex.lock().await.as_mut() {
+                Some(inner) => return inner.send(m, id).await,
+                None => (),
+            },
+            MaybeShared::Dead => return Err(StreamError::AlreadyClosed),
         }
+
+        self.0 = MaybeShared::Dead;
+        return Err(StreamError::AlreadyClosed);
     }
 
     /// Receives a encrypted message from the other peer on the specified channel and decodes it into `M` where `M: prost::Message + Default`,
@@ -69,11 +82,16 @@ impl NoiseStream {
         id: ChannelId,
     ) -> Result<Option<M>, StreamError> {
         match &mut self.0 {
-            MaybeShared::Owned(inner) => inner.recv(id).await,
-            // FIXME: This crashes if the shared stream seized to exist
-            MaybeShared::Shared(mutex) => mutex.lock().await.as_mut().unwrap().recv(id).await,
-            MaybeShared::Dead => Ok(None),
+            MaybeShared::Owned(inner) => return inner.recv(id).await,
+            MaybeShared::Shared(mutex) => match mutex.lock().await.as_mut() {
+                Some(inner) => return inner.recv(id).await,
+                None => (),
+            },
+            MaybeShared::Dead => return Err(StreamError::AlreadyClosed),
         }
+
+        self.0 = MaybeShared::Dead;
+        return Err(StreamError::AlreadyClosed);
     }
 }
 
@@ -104,7 +122,7 @@ impl InnerNoiseStream {
         &mut self,
         id: ChannelId,
     ) -> Result<Option<M>, StreamError> {
-        if let Some(ch) = &self.channels[id.0 as usize] {
+        if let Soon::Now(ch) = &self.channels[id.0 as usize] {
             match ch.receiver.try_recv() {
                 Ok(Control::Message(msg)) => {
                     return M::decode(msg.clone())
@@ -172,9 +190,14 @@ impl InnerNoiseStream {
                 return Err(std::io::Error::from(std::io::ErrorKind::InvalidData).into());
             }
 
+            if r_id == 0xFF {
+                self.process_proto_pack(buf)?;
+                continue;
+            }
+
             if id.0 != r_id {
                 let dl_ch = match &self.channels[r_id as usize] {
-                    Some(ch) => {
+                    Soon::Now(ch) => {
                         match ch.sender.send(buf) {
                             Ok(()) => false,
                             // channel is closed, notify peer by sending empty packet
@@ -188,7 +211,7 @@ impl InnerNoiseStream {
                 };
 
                 if dl_ch {
-                    self.channels[r_id as usize] = None;
+                    self.channels[r_id as usize] = Soon::None;
                 }
                 // recursion would be nice, not having stack overflows too :c
                 continue;
@@ -198,6 +221,26 @@ impl InnerNoiseStream {
                 .map(Some)
                 .map_err(|err| StreamError::DecodeError(err, fail_buf));
         }
+    }
+
+    fn process_proto_pack(&mut self, bytes: Bytes) -> Result<(), StreamError> {
+        use crate::proto::protocol::{protocol_packet::Kind, ProtocolPacket};
+
+        let packet = ProtocolPacket::decode(bytes.clone())
+            .map_err(|err| StreamError::DecodeError(err, bytes))?;
+        match packet.kind.ok_or_else(|| StreamError::InvalidPacket)? {
+            Kind::MakeChannel(mkch) => {
+                let id = mkch.id;
+                if id >= 0xFF {
+                    Err(StreamError::InvalidPacket)?;
+                }
+                let id = id as usize;
+                if matches!(&self.channels[id], Soon::Now(_) | Soon::Soon(_)) {
+                    // TODO: notify of possible race condition, this is not a corrupted state
+                }
+            }
+        }
+        Ok(())
     }
 }
 

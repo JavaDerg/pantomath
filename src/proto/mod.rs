@@ -10,6 +10,6 @@ pub mod server {
     include!(concat!(env!("OUT_DIR"), "/proto.server.rs"));
 }
 
-pub mod protocol {
+pub(crate) mod protocol {
     include!(concat!(env!("OUT_DIR"), "/proto.protocol.rs"));
 }

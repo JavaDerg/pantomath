@@ -19,6 +19,8 @@ pub enum StreamError {
     ChannelError(#[error(source)] ChannelError),
     #[error(display = "stream is already closed")]
     AlreadyClosed,
+    #[error(display = "invalid packet received")]
+    InvalidPacket,
 }
 
 #[derive(Debug, Error)]
@@ -27,4 +29,6 @@ pub enum ChannelError {
     DecodeError(#[error(source)] DecodeError, Bytes),
     #[error(display = "failed to encode packet")]
     EncodeError(#[error(source)] EncodeError),
+    #[error(display = "invalid packet received")]
+    InvalidPacket,
 }

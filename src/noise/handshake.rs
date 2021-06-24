@@ -1,13 +1,13 @@
 use crate::error::StreamError;
 use crate::noise::channel::IntNoiseChannel;
 use crate::noise::framed::{Frame16TcpStream, NOISE_FRAME_MAX_LEN};
-use crate::noise::{InnerNoiseStream, MaybeShared, NoiseStream};
+use crate::noise::{InnerNoiseStream, MaybeShared, NoiseStream, Soon};
 use sodiumoxide::crypto::box_::SecretKey;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const ICH_NONE: Option<IntNoiseChannel> = None;
+const ICH_NONE: Soon<IntNoiseChannel, IntNoiseChannel> = Soon::None;
 
 pub struct NoiseHandshake {
     stream: Frame16TcpStream,
