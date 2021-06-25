@@ -7,17 +7,14 @@ pub use listener::NoiseListener;
 
 use crate::error::StreamError;
 use crate::noise::channel::{ChannelId, Control, FailureResolution, IntNoiseChannel};
-use crate::noise::framed::{
-    extract_len, Frame16TcpStream, MAX_PAYLOAD_LEN, NOISE_FRAME_MAX_LEN, NOISE_TAG_LEN,
-};
+use crate::noise::framed::{extract_len, Frame16TcpStream, MAX_PAYLOAD_LEN, NOISE_FRAME_MAX_LEN};
 use crate::noise::handshake::NoiseHandshake;
-use crate::noise::Soon::Now;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flume::TryRecvError;
 use prost::Message;
 use snow::TransportState;
 use sodiumoxide::crypto::box_::SecretKey;
-use std::mem::{forget, swap, ManuallyDrop, MaybeUninit};
+use std::mem::swap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
@@ -64,10 +61,11 @@ impl NoiseStream {
     ) -> Result<(), StreamError> {
         match &mut self.0 {
             MaybeShared::Owned(inner) => return inner.send(m, id).await,
-            MaybeShared::Shared(mutex) => match mutex.lock().await.as_mut() {
-                Some(inner) => return inner.send(m, id).await,
-                None => (),
-            },
+            MaybeShared::Shared(mutex) => {
+                if let Some(inner) = mutex.lock().await.as_mut() {
+                    return inner.send(m, id).await;
+                }
+            }
             MaybeShared::Dead => return Err(StreamError::AlreadyClosed),
         }
 
@@ -83,10 +81,11 @@ impl NoiseStream {
     ) -> Result<Option<M>, StreamError> {
         match &mut self.0 {
             MaybeShared::Owned(inner) => return inner.recv(id).await,
-            MaybeShared::Shared(mutex) => match mutex.lock().await.as_mut() {
-                Some(inner) => return inner.recv(id).await,
-                None => (),
-            },
+            MaybeShared::Shared(mutex) => {
+                if let Some(inner) = mutex.lock().await.as_mut() {
+                    return inner.recv(id).await;
+                }
+            }
             MaybeShared::Dead => return Err(StreamError::AlreadyClosed),
         }
 
@@ -126,7 +125,7 @@ impl InnerNoiseStream {
             match ch.receiver.try_recv() {
                 Ok(Control::Message(msg)) => {
                     return M::decode(msg.clone())
-                        .map(|m| Some(m))
+                        .map(Some)
                         .map_err(|err| StreamError::DecodeError(err, msg))
                 }
                 Ok(Control::Eof) => return Ok(None),
@@ -136,7 +135,7 @@ impl InnerNoiseStream {
                         FailureResolution::CloseChannel => self.send_raw(&[id.0, 0][..]).await?,
                         FailureResolution::CloseConnection => todo!("Notify all channels and set inner shared state to None and inner state to Dead"),
                     }
-                    return Err(err)?;
+                    return Err(err.into());
                 }
                 Err(TryRecvError::Disconnected) => {
                     // Found dead channel but received packet, sending heads up to peer
@@ -228,11 +227,11 @@ impl InnerNoiseStream {
 
         let packet = ProtocolPacket::decode(bytes.clone())
             .map_err(|err| StreamError::DecodeError(err, bytes))?;
-        match packet.kind.ok_or_else(|| StreamError::InvalidPacket)? {
+        match packet.kind.ok_or(StreamError::InvalidPacket)? {
             Kind::MakeChannel(mkch) => {
                 let id = mkch.id;
                 if id >= 0xFF {
-                    Err(StreamError::InvalidPacket)?;
+                    return Err(StreamError::InvalidPacket);
                 }
                 let id = id as usize;
                 if matches!(&self.channels[id], Soon::Now(_) | Soon::Soon(_)) {
