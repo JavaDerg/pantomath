@@ -1,11 +1,14 @@
 use crate::error::ChannelError;
 use bytes::Bytes;
 use flume::{Receiver, Sender};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct NoiseChannel {
+    id: ChannelId,
     sender: Sender<Control>,
     receiver: Receiver<Bytes>,
-    id: ChannelId,
+    stream: Arc<Mutex<Option<super::InnerNoiseStream>>>,
 }
 
 #[derive(Eq, PartialEq, Copy, Clone)]
@@ -28,7 +31,7 @@ pub enum FailureResolution {
     CloseConnection,
 }
 
-struct InternalNoiseChannel {
+pub(super) struct InternalNoiseChannel {
     sender: Sender<Bytes>,
     receiver: Receiver<Bytes>,
 }
@@ -48,5 +51,11 @@ impl NoiseChannel {
                 receiver: p1r,
             },
         )
+    }
+}
+
+impl Drop for NoiseChannel {
+    fn drop(&mut self) {
+        let _ = self.sender.send(Control::Eof);
     }
 }

@@ -6,7 +6,7 @@ pub mod listener;
 pub use listener::NoiseListener;
 
 use crate::error::StreamError;
-use crate::noise::channel::{ChannelId, Control, FailureResolution, IntNoiseChannel};
+use crate::noise::channel::{ChannelId, Control, FailureResolution, IntNoiseChannel, NoiseChannel};
 use crate::noise::framed::{extract_len, Frame16TcpStream, MAX_PAYLOAD_LEN, NOISE_FRAME_MAX_LEN};
 use crate::noise::handshake::NoiseHandshake;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -52,6 +52,19 @@ impl NoiseStream {
         ))
     }
 
+    pub async fn make_channel(&mut self) -> Result<NoiseChannel, StreamError> {
+        if matches!(self.0, MaybeShared::Dead) {
+            return Err(StreamError::AlreadyClosed);
+        }
+        self.0.make_shared();
+        let sch = match &self.0 {
+            MaybeShared::Shared(sch) => sch,
+            _ => unreachable!(),
+        };
+
+        todo!()
+    }
+
     /// Sends a encrypted message to the other peer on the specified channel
     /// Use `NoiseChannel` over this function
     pub async fn send(
@@ -70,7 +83,7 @@ impl NoiseStream {
         }
 
         self.0 = MaybeShared::Dead;
-        return Err(StreamError::AlreadyClosed);
+        Err(StreamError::AlreadyClosed)
     }
 
     /// Receives a encrypted message from the other peer on the specified channel and decodes it into `M` where `M: prost::Message + Default`,
@@ -90,7 +103,7 @@ impl NoiseStream {
         }
 
         self.0 = MaybeShared::Dead;
-        return Err(StreamError::AlreadyClosed);
+        Err(StreamError::AlreadyClosed)
     }
 }
 
@@ -122,26 +135,34 @@ impl InnerNoiseStream {
         id: ChannelId,
     ) -> Result<Option<M>, StreamError> {
         if let Soon::Now(ch) = &self.channels[id.0 as usize] {
-            match ch.receiver.try_recv() {
-                Ok(Control::Message(msg)) => {
-                    return M::decode(msg.clone())
-                        .map(Some)
-                        .map_err(|err| StreamError::DecodeError(err, msg))
-                }
-                Ok(Control::Eof) => return Ok(None),
-                Ok(Control::Failure(err, res)) => {
-                    match res {
-                        FailureResolution::Ignore => (),
-                        FailureResolution::CloseChannel => self.send_raw(&[id.0, 0][..]).await?,
-                        FailureResolution::CloseConnection => todo!("Notify all channels and set inner shared state to None and inner state to Dead"),
+            loop {
+                match ch.receiver.try_recv() {
+                    Ok(Control::Message(msg)) => {
+                        return M::decode(msg.clone())
+                            .map(Some)
+                            .map_err(|err| StreamError::DecodeError(err, msg))
                     }
-                    return Err(err.into());
+                    Ok(Control::Eof) => return Ok(None),
+                    Ok(Control::Failure(err, res)) => {
+                        match res {
+                            FailureResolution::Ignore => continue,
+                            FailureResolution::CloseChannel => {
+                                self.send_raw(&[id.0, 0][..]).await?;
+                                break;
+                            }
+                            FailureResolution::CloseConnection => {
+                                self.die().await?;
+                            }
+                        }
+                        return Err(err.into());
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        // Found dead channel but received packet, sending heads up to peer
+                        self.send_raw(&[id.0, 0][..]).await?;
+                        break;
+                    }
+                    _ => (),
                 }
-                Err(TryRecvError::Disconnected) => {
-                    // Found dead channel but received packet, sending heads up to peer
-                    self.send_raw(&[id.0, 0][..]).await?;
-                }
-                _ => (),
             }
             // TODO
         }
@@ -190,7 +211,7 @@ impl InnerNoiseStream {
             }
 
             if r_id == 0xFF {
-                self.process_proto_pack(buf)?;
+                self.process_proto_pack(buf).await?;
                 continue;
             }
 
@@ -222,24 +243,62 @@ impl InnerNoiseStream {
         }
     }
 
-    fn process_proto_pack(&mut self, bytes: Bytes) -> Result<(), StreamError> {
-        use crate::proto::protocol::{protocol_packet::Kind, ProtocolPacket};
+    async fn die(&mut self) -> Result<(), StreamError> {
+        // Drop all channel senders/receivers
+        self.channels.iter_mut().for_each(|soon| *soon = Soon::None);
+        self.stream.shutdown().await?;
+        Ok(())
+    }
+
+    async fn process_proto_pack(&mut self, bytes: Bytes) -> Result<(), StreamError> {
+        use crate::proto::protocol::{
+            make_channel_response::Kind as McrKind, protocol_packet::Kind as PKind,
+            MakeChannelResponse, ProtocolPacket,
+        };
 
         let packet = ProtocolPacket::decode(bytes.clone())
             .map_err(|err| StreamError::DecodeError(err, bytes))?;
         match packet.kind.ok_or(StreamError::InvalidPacket)? {
-            Kind::MakeChannel(mkch) => {
+            PKind::MakeChannel(mkch) => {
                 let id = mkch.id;
                 if id >= 0xFF {
                     return Err(StreamError::InvalidPacket);
                 }
                 let id = id as usize;
-                if matches!(&self.channels[id], Soon::Now(_) | Soon::Soon(_)) {
-                    // TODO: notify of possible race condition, this is not a corrupted state
+                if !matches!(&self.channels[id], Soon::None) {
+                    let open = self
+                        .channels
+                        .iter()
+                        .zip(0u8..)
+                        .filter(|(soon, _)| matches!(*soon, Soon::None))
+                        .map(|(_, index)| index)
+                        .collect::<Vec<u8>>();
+                    self.send(
+                        &MakeChannelResponse {
+                            id: id as u32,
+                            kind: McrKind::Fail as i32,
+                            open,
+                        },
+                        ChannelId(0xFF),
+                    )
+                    .await?;
+                    return Ok(());
                 }
+            }
+            PKind::MakeChannelResponse(mcrsp) => {
+                todo!()
             }
         }
         Ok(())
+    }
+
+    fn find_new_channel(&self) -> Option<u8> {
+        self.channels
+            .iter()
+            .zip(0u8..)
+            .filter(|(soon, _)| matches!(*soon, Soon::None))
+            .map(|(_, index)| index)
+            .next()
     }
 }
 
