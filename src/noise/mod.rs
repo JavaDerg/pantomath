@@ -2,11 +2,12 @@ pub mod channel;
 pub mod framed;
 mod handshake;
 pub mod listener;
+mod select;
 
 pub use listener::NoiseListener;
 
 use crate::error::StreamError;
-use crate::noise::channel::{ChannelId, Control, FailureResolution, IntNoiseChannel, NoiseChannel};
+use crate::noise::channel::{ChannelId, Control, FailureResolution, InnerNoiseChannel, NoiseChannel};
 use crate::noise::framed::{extract_len, Frame16TcpStream, MAX_PAYLOAD_LEN, NOISE_FRAME_MAX_LEN};
 use crate::noise::handshake::NoiseHandshake;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -26,7 +27,8 @@ struct InnerNoiseStream {
     stream: Frame16TcpStream,
     noise: TransportState,
     // channel id 255 is reserved for protocol messages only
-    channels: [Soon<IntNoiseChannel, IntNoiseChannel>; 0xFF],
+    channels: [ChannelState; 0xFF],
+    update_queue: flume::Sender<NsRequest>,
 }
 
 enum MaybeShared<T> {
@@ -35,10 +37,15 @@ enum MaybeShared<T> {
     Dead,
 }
 
-enum Soon<N, S> {
-    Now(N),
-    Soon(S),
+enum ChannelState {
+    Now(InnerNoiseChannel),
+    Soon(InnerNoiseChannel),
+    Once(flume::Sender<Bytes>),
     None,
+}
+
+enum NsRequest {
+    NewOnce(u8, flume::Sender<Bytes>, flume::Sender<Result<(), StreamError>>)
 }
 
 impl NoiseStream {
@@ -134,7 +141,7 @@ impl InnerNoiseStream {
         &mut self,
         id: ChannelId,
     ) -> Result<Option<M>, StreamError> {
-        if let Soon::Now(ch) = &self.channels[id.0 as usize] {
+        if let ChannelState::Now(ch) = &self.channels[id.0 as usize] {
             loop {
                 match ch.receiver.try_recv() {
                     Ok(Control::Message(msg)) => {
@@ -217,7 +224,7 @@ impl InnerNoiseStream {
 
             if id.0 != r_id {
                 let dl_ch = match &self.channels[r_id as usize] {
-                    Soon::Now(ch) => {
+                    ChannelState::Now(ch) => {
                         match ch.sender.send(buf) {
                             Ok(()) => false,
                             // channel is closed, notify peer by sending empty packet
@@ -231,7 +238,7 @@ impl InnerNoiseStream {
                 };
 
                 if dl_ch {
-                    self.channels[r_id as usize] = Soon::None;
+                    self.channels[r_id as usize] = ChannelState::None;
                 }
                 // recursion would be nice, not having stack overflows too :c
                 continue;
@@ -243,9 +250,13 @@ impl InnerNoiseStream {
         }
     }
 
+    async fn recv_send_updt(&mut self) -> Result<(), StreamError> {
+        todo!()
+    }
+
     async fn die(&mut self) -> Result<(), StreamError> {
         // Drop all channel senders/receivers
-        self.channels.iter_mut().for_each(|soon| *soon = Soon::None);
+        self.channels.iter_mut().for_each(|soon| *soon = ChannelState::None);
         self.stream.shutdown().await?;
         Ok(())
     }
@@ -265,12 +276,12 @@ impl InnerNoiseStream {
                     return Err(StreamError::InvalidPacket);
                 }
                 let id = id as usize;
-                if !matches!(&self.channels[id], Soon::None) {
+                if !matches!(&self.channels[id], ChannelState::None) {
                     let open = self
                         .channels
                         .iter()
                         .zip(0u8..)
-                        .filter(|(soon, _)| matches!(*soon, Soon::None))
+                        .filter(|(soon, _)| matches!(*soon, ChannelState::None))
                         .map(|(_, index)| index)
                         .collect::<Vec<u8>>();
                     self.send(
@@ -296,7 +307,7 @@ impl InnerNoiseStream {
         self.channels
             .iter()
             .zip(0u8..)
-            .filter(|(soon, _)| matches!(*soon, Soon::None))
+            .filter(|(soon, _)| matches!(*soon, ChannelState::None))
             .map(|(_, index)| index)
             .next()
     }

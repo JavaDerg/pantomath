@@ -14,7 +14,7 @@ pub struct NoiseChannel {
 #[derive(Eq, PartialEq, Copy, Clone)]
 pub struct ChannelId(pub u8);
 
-pub(crate) struct IntNoiseChannel {
+pub(crate) struct InnerNoiseChannel {
     pub sender: Sender<Bytes>,
     pub receiver: Receiver<Control>,
 }
@@ -37,7 +37,7 @@ pub(super) struct InternalNoiseChannel {
 }
 
 impl NoiseChannel {
-    pub(super) fn new_pair(id: ChannelId) -> (Self, IntNoiseChannel) {
+    pub(super) fn new_pair(id: ChannelId) -> (Self, InnerNoiseChannel) {
         let (p1s, p1r) = flume::unbounded();
         let (p2s, p2r) = flume::unbounded();
         (
@@ -45,8 +45,9 @@ impl NoiseChannel {
                 sender: p1s,
                 receiver: p2r,
                 id,
+                stream: todo!(),
             },
-            IntNoiseChannel {
+            InnerNoiseChannel {
                 sender: p2s,
                 receiver: p1r,
             },
