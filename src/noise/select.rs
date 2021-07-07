@@ -3,11 +3,17 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use crate::noise::framed::Frame16TcpStream;
+use crate::noise::framed::{Frame16TcpStream, MAX_PAYLOAD_LEN};
 use crate::noise::NsRequest;
+use bytes::Buf;
+use bytes::Bytes;
+use flume::RecvError;
 use futures::task::ArcWake;
+use futures::FutureExt;
+use std::iter::FromIterator;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 macro_rules! ready {
     (~ $e:expr, $handle:expr $(,)?) => {
@@ -30,33 +36,40 @@ macro_rules! ready {
 
 macro_rules! context {
     (
-        in (
-            $cx:expr,
-            $arc:expr,
-            $cx:expr $(,)?
-        );
-        $(let $n:ident = $v:expr;)*
+        in ($cx:expr, $arc:expr $(,)?);
+        $(let $n:pat = $v:expr;)*
+        $(~ let $n_o:pat = $v_o:expr;)?
     ) => {
         $(
             let ____________waker = futures::task::waker(Arc::new(IdWaker(
                 $v,
-                arc,
+                $arc.clone(),
                 $cx.waker().clone(),
             )));
             let $n = Context::from_waker(&____________waker);
         )*
+        $(
+            let ____________waker = futures::task::waker(Arc::new(IdWaker(
+                $v_o,
+                $arc,
+                $cx.waker().clone(),
+            )));
+            let $n_o = Context::from_waker(&____________waker);
+        )?
     }
 }
 
-pub struct SafeRecvSendUpdt<'a> {
+pub(super) struct SafeRecvSendUpdt<'a> {
     update_recv: &'a mut flume::r#async::RecvFut<'a, NsRequest>,
     sendrecv: &'a mut Frame16TcpStream,
-    send: bool,
+    send: Option<Bytes>,
     state: Arc<AtomicUsize>,
 }
 
-pub enum RsuResponse {
+pub(super) enum RsuResponse {
     Update(NsRequest),
+    Wrote,
+    Read(Bytes),
 }
 
 impl<'a> SafeRecvSendUpdt<'a> {}
@@ -65,6 +78,8 @@ struct IdWaker(usize, Arc<AtomicUsize>, Waker);
 
 const NONE: usize = 0;
 const UPDATE: usize = 1;
+const SEND: usize = 2;
+const RECV: usize = 3;
 
 impl<'a> Future for SafeRecvSendUpdt<'a> {
     type Output = Result<RsuResponse, StreamError>;
@@ -77,19 +92,65 @@ impl<'a> Future for SafeRecvSendUpdt<'a> {
             state,
         } = &mut *self;
 
-        let update = Pin::new(&mut **update_recv);
-        context! {
-            in cx;
-            let update_context = UPDATE;
-        }
-
-        match state.load(Ordering::Acquire) {
+        match state.swap(0, Ordering::AcqRel) {
             NONE => {
-                ready!(~ update.poll(update_context), |r: Result<NsRequest, flume::RecvError>| Ok(RsuResponse::Update(r.expect("Channel can not be closed"))));
+                context! {
+                    in (cx, state.clone());
+                    let mut update_context = UPDATE;
+                    let mut send_context = SEND;
+                    ~ let mut recv_context = RECV;
+                }
+
+                ready!(~ update_recv.poll_unpin(&mut update_context), |r: Result<NsRequest, flume::RecvError>| Ok(RsuResponse::Update(r.expect("Channel can not be closed"))));
+                if let Some(bytes) = send {
+                    let sendrecv = Pin::new(&mut **sendrecv);
+                    ready!(~ sendrecv.poll_write(&mut send_context, bytes.chunk()), |r: std::io::Result<usize>| r.map(|_| RsuResponse::Wrote).map_err(|err| err.into()));
+                }
+
+                let mut buf = (0..MAX_PAYLOAD_LEN).map(|_| 0u8).collect::<Vec<_>>();
+                let mut read_buf = ReadBuf::new(buf.as_mut_slice());
+
+                let sendrecv = Pin::new(&mut **sendrecv);
+                let res = sendrecv.poll_read(&mut recv_context, &mut read_buf);
+                let len = read_buf.filled().len();
+                let _ = read_buf;
+                buf.truncate(len);
+                ready!(~ res, |r: std::io::Result<()>| r.map(|_| RsuResponse::Read(Bytes::from(buf))).map_err(|err| err.into()));
             }
-            _ => (),
+            UPDATE => {
+                context! {
+                    in (cx, state.clone());
+                    ~ let mut context = UPDATE;
+                }
+                state.store(0, Ordering::Release);
+                return update_recv
+                    .poll_unpin(&mut context)
+                    .map(|r| Ok(RsuResponse::Update(r.expect("Channel can not be closed"))));
+            }
+            SEND => {
+                context! {
+                    in (cx, state.clone());
+                    ~ let mut context = SEND;
+                }
+                state.store(0, Ordering::Release);
+                return Pin::new(&mut **sendrecv)
+                    .poll_write(&mut context, send.as_ref().unwrap().chunk())
+                    .map_ok(|_| RsuResponse::Wrote)
+                    .map_err(|err| err.into());
+            }
+            RECV => {
+                context! {
+                    in (cx, state.clone());
+                    ~ let mut context = RECV;
+                }
+                state.store(0, Ordering::Release);
+                return update_recv
+                    .poll_unpin(&mut context)
+                    .map(|r| Ok(RsuResponse::Update(r.expect("Channel can not be closed"))));
+            }
+            x => unreachable!("Invalid state id supplied? {}", x),
         }
-        todo!()
+        Poll::Pending
     }
 }
 
