@@ -60,10 +60,10 @@ macro_rules! context {
 }
 
 pub(super) struct SafeRecvSendUpdt<'a> {
-    update_recv: &'a mut flume::r#async::RecvFut<'a, NsRequest>,
-    sendrecv: &'a mut Frame16TcpStream,
-    send: Option<Bytes>,
-    state: Arc<AtomicUsize>,
+    pub update_recv: &'a mut flume::r#async::RecvFut<'a, NsRequest>,
+    pub sendrecv: &'a mut Frame16TcpStream,
+    pub send: Option<Bytes>,
+    pub state: Arc<AtomicUsize>,
 }
 
 pub(super) enum RsuResponse {
@@ -76,10 +76,10 @@ impl<'a> SafeRecvSendUpdt<'a> {}
 
 struct IdWaker(usize, Arc<AtomicUsize>, Waker);
 
-const NONE: usize = 0;
-const UPDATE: usize = 1;
-const SEND: usize = 2;
-const RECV: usize = 3;
+pub const NONE: usize = 0;
+pub const UPDATE: usize = 1;
+pub const SEND: usize = 2;
+pub const RECV: usize = 3;
 
 impl<'a> Future for SafeRecvSendUpdt<'a> {
     type Output = Result<RsuResponse, StreamError>;
@@ -92,7 +92,7 @@ impl<'a> Future for SafeRecvSendUpdt<'a> {
             state,
         } = &mut *self;
 
-        match state.swap(0, Ordering::AcqRel) {
+        match state.swap(NONE, Ordering::AcqRel) {
             NONE => {
                 context! {
                     in (cx, state.clone());
@@ -122,7 +122,6 @@ impl<'a> Future for SafeRecvSendUpdt<'a> {
                     in (cx, state.clone());
                     ~ let mut context = UPDATE;
                 }
-                state.store(0, Ordering::Release);
                 return update_recv
                     .poll_unpin(&mut context)
                     .map(|r| Ok(RsuResponse::Update(r.expect("Channel can not be closed"))));
@@ -132,7 +131,6 @@ impl<'a> Future for SafeRecvSendUpdt<'a> {
                     in (cx, state.clone());
                     ~ let mut context = SEND;
                 }
-                state.store(0, Ordering::Release);
                 return Pin::new(&mut **sendrecv)
                     .poll_write(&mut context, send.as_ref().unwrap().chunk())
                     .map_ok(|_| RsuResponse::Wrote)
@@ -143,7 +141,6 @@ impl<'a> Future for SafeRecvSendUpdt<'a> {
                     in (cx, state.clone());
                     ~ let mut context = RECV;
                 }
-                state.store(0, Ordering::Release);
                 return update_recv
                     .poll_unpin(&mut context)
                     .map(|r| Ok(RsuResponse::Update(r.expect("Channel can not be closed"))));

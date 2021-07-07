@@ -7,7 +7,9 @@ mod select;
 pub use listener::NoiseListener;
 
 use crate::error::StreamError;
-use crate::noise::channel::{ChannelId, Control, FailureResolution, InnerNoiseChannel, NoiseChannel};
+use crate::noise::channel::{
+    ChannelId, Control, FailureResolution, InnerNoiseChannel, NoiseChannel,
+};
 use crate::noise::framed::{extract_len, Frame16TcpStream, MAX_PAYLOAD_LEN, NOISE_FRAME_MAX_LEN};
 use crate::noise::handshake::NoiseHandshake;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -28,13 +30,20 @@ struct InnerNoiseStream {
     noise: TransportState,
     // channel id 255 is reserved for protocol messages only
     channels: [ChannelState; 0xFF],
-    update_queue: flume::Sender<NsRequest>,
+    update_queue: flume::Receiver<NsRequest>,
 }
 
 enum MaybeShared<T> {
     Owned(T),
-    Shared(Arc<Mutex<Option<T>>>),
+    Shared(Arc<ShareGroup<T>>),
     Dead,
+}
+
+struct ShareGroup<T> {
+    inner: Mutex<Option<T>>,
+    update: flume::Sender<NsRequest>,
+    update_block: tokio::sync::Semaphore,
+    notify: tokio::sync::Notify,
 }
 
 enum ChannelState {
@@ -45,7 +54,13 @@ enum ChannelState {
 }
 
 enum NsRequest {
-    NewOnce(u8, flume::Sender<Bytes>, flume::Sender<Result<(), StreamError>>)
+    NewOnce(
+        u8,
+        flume::Sender<Bytes>,
+        flume::Sender<Result<(), StreamError>>,
+    ),
+    Send(Bytes, flume::Sender<Result<(), StreamError>>),
+    Recv(u8, flume::Sender<Result<Option<Bytes>, StreamError>>),
 }
 
 impl NoiseStream {
@@ -64,10 +79,7 @@ impl NoiseStream {
             return Err(StreamError::AlreadyClosed);
         }
         self.0.make_shared();
-        let sch = match &self.0 {
-            MaybeShared::Shared(sch) => sch,
-            _ => unreachable!(),
-        };
+        if let MaybeShared::Shared(_0) = &self.0 {}
 
         todo!()
     }
@@ -81,16 +93,38 @@ impl NoiseStream {
     ) -> Result<(), StreamError> {
         match &mut self.0 {
             MaybeShared::Owned(inner) => return inner.send(m, id).await,
-            MaybeShared::Shared(mutex) => {
-                if let Some(inner) = mutex.lock().await.as_mut() {
-                    return inner.send(m, id).await;
+            MaybeShared::Shared(share) => loop {
+                // First we try to lock the mutex and send normally
+                if let Ok(inside) = share.inner.try_lock().as_deref_mut() {
+                    match inside {
+                        Some(inner) => {
+                            let res = inner.send(m, id).await;
+                            share.notify.notify_waiters();
+                            return res;
+                        }
+                        None => {
+                            break;
+                        }
+                    }
+                } else if share.update_block.available_permits() != 0 {
+                    // if that's not possible we check if there are currently any permits available,
+                    // if yes that means that current keeper of the mutex is done with it's task and just wrapping up, no new messages can be pushed safely
+                    let (tx, rx) = flume::bounded(1);
+                    share
+                        .update
+                        .send_async(NsRequest::Send(InnerNoiseStream::byteify(m, id)?, tx))
+                        .await;
+                    return rx.recv_async().await.expect("Sender can not drop");
+                } else {
+                    // Therefore we wait till the next possibility to lock the mutex our self
+                    share.notify.notified().await;
                 }
-            }
+            },
             MaybeShared::Dead => return Err(StreamError::AlreadyClosed),
         }
 
         self.0 = MaybeShared::Dead;
-        Err(StreamError::AlreadyClosed)
+        return Err(StreamError::AlreadyClosed);
     }
 
     /// Receives a encrypted message from the other peer on the specified channel and decodes it into `M` where `M: prost::Message + Default`,
@@ -101,11 +135,27 @@ impl NoiseStream {
     ) -> Result<Option<M>, StreamError> {
         match &mut self.0 {
             MaybeShared::Owned(inner) => return inner.recv(id).await,
-            MaybeShared::Shared(mutex) => {
-                if let Some(inner) = mutex.lock().await.as_mut() {
-                    return inner.recv(id).await;
+            MaybeShared::Shared(share) => loop {
+                if let Ok(inside) = share.inner.try_lock().as_deref_mut() {
+                    match inside {
+                        Some(inner) => {
+                            let res = inner.recv(id).await;
+                            share.notify.notify_waiters();
+                            return res;
+                        }
+                        None => break,
+                    }
+                } else if share.update_block.available_permits() != 0 {
+                    // if that's not possible we check if there are currently any permits available,
+                    // if yes that means that current keeper of the mutex is done with it's task and just wrapping up, no new messages can be pushed safely
+                    let (tx, rx) = flume::bounded(1);
+                    share.update.send_async(NsRequest::Recv(id.0, tx)).await;
+                    return rx.recv_async().await.expect("Sender can not drop");
+                } else {
+                    // Therefore we wait till the next possibility to lock the mutex our self
+                    share.notify.notified().await;
                 }
-            }
+            },
             MaybeShared::Dead => return Err(StreamError::AlreadyClosed),
         }
 
@@ -120,11 +170,14 @@ impl InnerNoiseStream {
         m: &impl prost::Message,
         id: ChannelId,
     ) -> Result<(), StreamError> {
+        self.send_raw(Self::byteify(m, id)?.chunk()).await
+    }
+
+    pub fn byteify(m: &impl prost::Message, id: ChannelId) -> Result<Bytes, StreamError> {
         let mut buf = BytesMut::with_capacity(m.encoded_len() + 4);
         buf.put_u8(id.0);
         m.encode_length_delimited(&mut buf)?;
-        let buf = buf.freeze();
-        self.send_raw(buf.chunk()).await
+        Ok(buf.freeze())
     }
 
     async fn send_raw(&mut self, payload: &[u8]) -> Result<(), StreamError> {
@@ -251,12 +304,20 @@ impl InnerNoiseStream {
     }
 
     async fn recv_send_updt(&mut self) -> Result<(), StreamError> {
+        let srsu = select::SafeRecvSendUpdt {
+            update_recv: todo!(),
+            sendrecv: &mut self.stream,
+            send: None,
+            state: Arc::new(Default::default()),
+        };
         todo!()
     }
 
     async fn die(&mut self) -> Result<(), StreamError> {
         // Drop all channel senders/receivers
-        self.channels.iter_mut().for_each(|soon| *soon = ChannelState::None);
+        self.channels
+            .iter_mut()
+            .for_each(|soon| *soon = ChannelState::None);
         self.stream.shutdown().await?;
         Ok(())
     }
