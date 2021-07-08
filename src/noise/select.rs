@@ -60,7 +60,7 @@ macro_rules! context {
 }
 
 pub(super) struct SafeRecvSendUpdt<'a> {
-    pub update_recv: &'a mut flume::r#async::RecvFut<'a, NsRequest>,
+    pub update_recv: flume::r#async::RecvFut<'a, NsRequest>,
     pub sendrecv: &'a mut Frame16TcpStream,
     pub send: Option<Bytes>,
     pub state: Arc<AtomicUsize>,

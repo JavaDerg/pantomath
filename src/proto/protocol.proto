@@ -4,25 +4,23 @@ package proto.protocol;
 
 message ProtocolPacket {
     oneof kind {
-        MakeChannel         make_channel          = 1;
-        MakeChannelResponse make_channel_response = 2;
+        MakeChannel make_channel = 1;
     };
 }
 
 message MakeChannel {
     // is actually u8, does NOT support any other values, CHECK!
     uint32 id = 1;
+    oneof init {
+        EventStreamInit   event   = 2;
+        ControlStreamInit control = 3;
+    };
 }
 
-message MakeChannelResponse {
-    enum Kind {
-        OK = 0;
-        FAIL = 1;
-    }
+message EventStreamInit {
 
-    // is actually u8, does NOT support any other values, CHECK!
-    uint32 id   = 1;
-    Kind   kind = 2;
-    // empty when kind == OK
-    bytes  open = 3;
+}
+
+message ControlStreamInit {
+
 }

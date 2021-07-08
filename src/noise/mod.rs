@@ -18,47 +18,36 @@ use prost::Message;
 use snow::TransportState;
 use sodiumoxide::crypto::box_::SecretKey;
 use std::mem::swap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, SemaphorePermit};
 
-pub struct NoiseStream(MaybeShared<InnerNoiseStream>);
+pub struct NoiseStream(MaybeShared);
 
 struct InnerNoiseStream {
     stream: Frame16TcpStream,
     noise: TransportState,
     // channel id 255 is reserved for protocol messages only
-    channels: [ChannelState; 0xFF],
+    channels: [Option<InnerNoiseChannel>; 0xFF],
     update_queue: flume::Receiver<NsRequest>,
+    share: Weak<ShareGroup>,
 }
 
-enum MaybeShared<T> {
-    Owned(T),
-    Shared(Arc<ShareGroup<T>>),
+enum MaybeShared {
+    Owned(InnerNoiseStream),
+    Shared(Arc<ShareGroup>),
     Dead,
 }
 
-struct ShareGroup<T> {
-    inner: Mutex<Option<T>>,
+struct ShareGroup {
+    inner: Mutex<Option<InnerNoiseStream>>,
     update: flume::Sender<NsRequest>,
     update_block: tokio::sync::Semaphore,
     notify: tokio::sync::Notify,
 }
 
-enum ChannelState {
-    Now(InnerNoiseChannel),
-    Soon(InnerNoiseChannel),
-    Once(flume::Sender<Bytes>),
-    None,
-}
-
 enum NsRequest {
-    NewOnce(
-        u8,
-        flume::Sender<Bytes>,
-        flume::Sender<Result<(), StreamError>>,
-    ),
     Send(Bytes, flume::Sender<Result<(), StreamError>>),
     Recv(u8, flume::Sender<Result<Option<Bytes>, StreamError>>),
 }
@@ -112,7 +101,7 @@ impl NoiseStream {
                     let (tx, rx) = flume::bounded(1);
                     share
                         .update
-                        .send_async(NsRequest::Send(InnerNoiseStream::byteify(m, id)?, tx))
+                        .send_async(NsRequest::Send(InnerNoiseStream::bytesify(m, id)?, tx))
                         .await;
                     return rx.recv_async().await.expect("Sender can not drop");
                 } else {
@@ -136,12 +125,13 @@ impl NoiseStream {
         match &mut self.0 {
             MaybeShared::Owned(inner) => return inner.recv(id).await,
             MaybeShared::Shared(share) => loop {
-                if let Ok(inside) = share.inner.try_lock().as_deref_mut() {
+                let mut lock = share.inner.try_lock();
+                let (res, permit) = if let Ok(inside) = lock.as_deref_mut() {
                     match inside {
                         Some(inner) => {
                             let res = inner.recv(id).await;
-                            share.notify.notify_waiters();
-                            return res;
+                            let permit = inner.post_update().await;
+                            (res, permit)
                         }
                         None => break,
                     }
@@ -150,11 +140,23 @@ impl NoiseStream {
                     // if yes that means that current keeper of the mutex is done with it's task and just wrapping up, no new messages can be pushed safely
                     let (tx, rx) = flume::bounded(1);
                     share.update.send_async(NsRequest::Recv(id.0, tx)).await;
-                    return rx.recv_async().await.expect("Sender can not drop");
+                    return Ok(match rx.recv_async().await.expect("Sender can not drop")? {
+                        Some(m) => Some(InnerNoiseStream::debytesify(m)?),
+                        None => None,
+                    });
                 } else {
                     // Therefore we wait till the next possibility to lock the mutex our self
                     share.notify.notified().await;
-                }
+                    continue;
+                };
+                // This order is important!!!
+                // We first drop the mutex guard it self, unlocking the mutex again
+                drop(lock);
+                // Then we will clear our semaphore so the the channels wont get stuck on a maybe later resolved notification
+                drop(permit);
+                // Finally we notify the channels to continue their business, the first to continue will unlock the mutex again and accept the packets of others
+                share.notify.notify_waiters();
+                return res;
             },
             MaybeShared::Dead => return Err(StreamError::AlreadyClosed),
         }
@@ -170,14 +172,19 @@ impl InnerNoiseStream {
         m: &impl prost::Message,
         id: ChannelId,
     ) -> Result<(), StreamError> {
-        self.send_raw(Self::byteify(m, id)?.chunk()).await
+        self.update();
+        self.send_raw(Self::bytesify(m, id)?.chunk()).await
     }
 
-    pub fn byteify(m: &impl prost::Message, id: ChannelId) -> Result<Bytes, StreamError> {
+    pub fn bytesify(m: &impl prost::Message, id: ChannelId) -> Result<Bytes, StreamError> {
         let mut buf = BytesMut::with_capacity(m.encoded_len() + 4);
         buf.put_u8(id.0);
         m.encode_length_delimited(&mut buf)?;
         Ok(buf.freeze())
+    }
+
+    pub fn debytesify<M: Message + Default>(bytes: Bytes) -> Result<M, StreamError> {
+        M::decode(bytes.clone()).map_err(|err| StreamError::DecodeError(err, bytes))
     }
 
     async fn send_raw(&mut self, payload: &[u8]) -> Result<(), StreamError> {
@@ -194,7 +201,8 @@ impl InnerNoiseStream {
         &mut self,
         id: ChannelId,
     ) -> Result<Option<M>, StreamError> {
-        if let ChannelState::Now(ch) = &self.channels[id.0 as usize] {
+        self.update();
+        if let Some(ch) = &self.channels[id.0 as usize] {
             loop {
                 match ch.receiver.try_recv() {
                     Ok(Control::Message(msg)) => {
@@ -208,7 +216,7 @@ impl InnerNoiseStream {
                             FailureResolution::Ignore => continue,
                             FailureResolution::CloseChannel => {
                                 self.send_raw(&[id.0, 0][..]).await?;
-                                break;
+                                return Ok(None);
                             }
                             FailureResolution::CloseConnection => {
                                 self.die().await?;
@@ -224,7 +232,6 @@ impl InnerNoiseStream {
                     _ => (),
                 }
             }
-            // TODO
         }
 
         loop {
@@ -303,11 +310,32 @@ impl InnerNoiseStream {
         }
     }
 
-    async fn recv_send_updt(&mut self) -> Result<(), StreamError> {
+    async fn update(&mut self) {
+        for update in self.update_queue.try_iter() {
+            match update {
+                NsRequest::Send(bytes, tx) => self.recv_send_updt(),
+                NsRequest::Recv(id, tx) => {}
+            }
+        }
+    }
+
+    /// This is only allowed to be called within a shared context, otherwise panic!
+    pub async fn post_update(&mut self) -> SemaphorePermit {
+        let share = self
+            .share
+            .upgrade()
+            .expect("post_update called without being shared");
+        // unwrap is fine as we never close the semaphore
+        let permit = share.update_block.acquire_owned().await.unwrap();
+
+        permit
+    }
+
+    async fn recv_send_updt(&mut self, send: Option<Bytes>) -> Result<(), StreamError> {
         let srsu = select::SafeRecvSendUpdt {
-            update_recv: todo!(),
+            update_recv: self.update_queue.recv_async(),
             sendrecv: &mut self.stream,
-            send: None,
+            send,
             state: Arc::new(Default::default()),
         };
         todo!()

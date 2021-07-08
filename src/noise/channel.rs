@@ -1,6 +1,8 @@
-use crate::error::ChannelError;
+use crate::error::{ChannelError, StreamError};
 use bytes::Bytes;
 use flume::{Receiver, Sender};
+use prost::Message;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -52,6 +54,18 @@ impl NoiseChannel {
                 receiver: p1r,
             },
         )
+    }
+
+    pub async fn recv<M: Message>(&mut self) -> Result<Option<M>, StreamError> {
+        todo!()
+    }
+
+    pub async fn send<M: Message>(&mut self, m: &M) -> Result<(), StreamError> {
+        todo!()
+    }
+
+    pub async fn new_channel(&mut self) -> ! {
+        todo!()
     }
 }
 
