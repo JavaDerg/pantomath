@@ -3,6 +3,7 @@ pub mod framed;
 mod handshake;
 pub mod listener;
 mod select;
+mod udp_controller;
 
 pub use listener::NoiseListener;
 
