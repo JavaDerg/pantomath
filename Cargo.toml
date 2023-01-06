@@ -24,7 +24,7 @@ prost = "^0.7.0"
 static_assertions = "^1.1.0"
 
 [dependencies.tokio]
-version = "^1.6.2"
+version = "^1.18.4"
 features = ["rt", "rt-multi-thread", "net", "macros", "fs", "io-util", "sync"]
 
 [profile.release]
